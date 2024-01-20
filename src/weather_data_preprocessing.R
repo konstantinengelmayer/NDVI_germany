@@ -1,7 +1,7 @@
 # Get the weather data from one station: 
 library(rdwd) # for the dwd download
 #TODO: Get data from dwd
-link <- selectDWD(id="001420", res="daily", var="kl", per="rescent") # Get the link from the DWD Website
+link <- selectDWD(id="001420", res="daily", var="kl", per="rescent") # Get the link from the DWD Website Frankfurt
 file <- dataDWD(link, read=F) # Creating a file
 df <- readDWD(file, varnames = T) # Reading the file with all values and names
 
