@@ -10,7 +10,12 @@ packagesToLoad <- c(
   "purrr",
   "stars",
   "magick",
-  "mapview"
+  "mapview",
+  "lubridate",
+  "dplyr",
+  "tidyr",
+  "stringr",
+  "ggplot2"
 )
 
 # define a project root folder
@@ -20,6 +25,9 @@ rootDir <- "~/edu/NDVI_germany"
 projectDirList <- c(
   "data/",
   "data/raster_data/data_level0",
+  "data/raster_data/data_level0/NDVI_data",
+  "data/raster_data/data_level0/NDVI_data/ndvi",
+  "data/raster_data/data_level0/NDVI_data/quality_layer",
   "data/raster_data/data_level1",
   "data/vector_data",
   "docs/",
