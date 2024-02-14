@@ -15,7 +15,10 @@ packagesToLoad <- c(
   "dplyr",
   "tidyr",
   "stringr",
-  "ggplot2"
+  "ggplot2",
+  "zoo",
+  "furrr",
+  "future"
 )
 
 # define a project root folder
