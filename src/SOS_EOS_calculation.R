@@ -52,7 +52,8 @@ saveRDS(result_df, file="~/edu/NDVI_germany/data/raster_data/data_level1/long_nd
 
 
 
-
+################################################################################
+######################## Start of calculation ##################################
 ################################################################################
 # TODO: Load the dataframe
 # Note: The smoother value affects the result of SOS and EOS!
@@ -252,7 +253,7 @@ print(test_grouped_filtered, n=900)
 
 
 
-
+# TODO: Plot the first 20 pixel groups
 # First, ensure the Date column is of type Date if not already
 test_grouped_filtered$Date <- as.Date(test_grouped_filtered$Date)
 
@@ -283,7 +284,7 @@ ggplot(filtered_for_plot, aes(x = Month, y = NDVI_Value_Smoothed, group = intera
 
 
 ################################### calculate ##################################
-
+# Without autumn minimum
 calculate_sos_eos_apg_pgt <- function(df) {
   if(nrow(df) == 0) return(data.frame(SOS = NA, EOS = NA, APG = NA, PGT = NA)) # Early return for empty groups
   
@@ -353,3 +354,86 @@ boxplot(sos_eos_apg_results$PGT)
 hist(sos_eos_apg_results$SOS, breaks=11)
 hist(sos_eos_apg_results$EOS, breaks=11)
 hist(sos_eos_apg_results$APG, breaks=11)
+
+
+
+
+
+
+################################################################################
+# With autumn minimum
+
+calculate_sos_eos_apg_pgt_autumn_min <- function(df) {
+  if(nrow(df) == 0) return(data.frame(SOS = NA, EOS = NA, APG = NA, PGT = NA)) # Early return for empty groups
+  
+  # Initial calculations for APG and PGT
+  APG <- max(df$NDVI_Value_Smoothed, na.rm = TRUE)
+  PGT <- df$Date[which.max(df$NDVI_Value_Smoothed)]
+  
+  # Calculate NDVImin for EOS calculation as the minimum NDVI value observed after PGT till the end of the year
+  NDVImin_post_PGT <- ifelse(any(df$Date > PGT), min(df$NDVI_Value_Smoothed[df$Date > PGT], na.rm = TRUE), NA)
+  NDVImax <- APG
+  
+  # Adjust NDVImin to avoid using the start-of-year minimum for EOS calculation
+  NDVImin_for_ratio <- if(!is.na(NDVImin_post_PGT) && NDVImin_post_PGT > min(df$NDVI_Value_Smoothed, na.rm = TRUE)) {
+    NDVImin_post_PGT
+  } else {
+    min(df$NDVI_Value_Smoothed, na.rm = TRUE)
+  }
+  
+  df$NDVIratio <- (df$NDVI_Value_Smoothed - NDVImin_for_ratio) / (NDVImax - NDVImin_for_ratio)
+  
+  # SOS calculation based on four consecutive days above the threshold
+  df$above_threshold <- df$NDVIratio >= 0.5
+  sos <- calculate_threshold_crossing(df, TRUE, 3)
+  
+  # EOS calculation focusing on data after PGT, using adjusted NDVImin
+  eos <- if(!is.na(PGT)) {
+    df_post_PGT <- df %>% filter(Date >= PGT)
+    calculate_threshold_crossing(df_post_PGT, FALSE, 3)
+  } else {
+    NA
+  }
+  
+  return(data.frame(SOS = sos, EOS = eos, APG = APG, PGT = PGT))
+}
+
+#################################### ???
+calculate_threshold_crossing <- function(df, isAbove, minDays) {
+  df$sequence <- with(rle(df$above_threshold), rep(seq_along(lengths), lengths))
+  if(isAbove) {
+    df <- df %>% filter(above_threshold == TRUE)
+  } else {
+    df <- df %>% filter(above_threshold == FALSE)
+  }
+  valid_sequences <- df %>% group_by(sequence) %>% filter(n() >= minDays) %>% summarise(Date = first(Date))
+  
+  if(nrow(valid_sequences) > 0) {
+    if(isAbove) {
+      return(first(valid_sequences$Date))
+    } else {
+      return(last(valid_sequences$Date))
+    }
+  } else {
+    return(NA)
+  }
+}
+##################################
+
+# TODO: Apply the function to the filtered groups
+sos_eos_apg_results_aut_min <- test_grouped_filtered %>%
+  group_by(x, y, Year) %>%
+  group_modify(~ calculate_sos_eos_apg_pgt_autumn_min(.)) %>%
+  ungroup()
+
+############################## visualize results ###############################
+
+str(sos_eos_apg_results_aut_min)
+print(sos_eos_apg_results_aut_min)
+boxplot(sos_eos_apg_results_aut_min$SOS)
+boxplot(sos_eos_apg_results_aut_min$EOS)
+boxplot(sos_eos_apg_results_aut_min$APG)
+boxplot(sos_eos_apg_results_aut_min$PGT)
+hist(sos_eos_apg_results_aut_min$SOS, breaks=12)
+hist(sos_eos_apg_results_aut_min$EOS, breaks=12)
+hist(sos_eos_apg_results_aut_min$APG, breaks=12)
