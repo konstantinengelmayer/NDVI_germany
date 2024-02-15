@@ -61,7 +61,8 @@ start_of_season <- data_normalized %>%
     Above_Threshold = Norm_NDVI > 0.5,
     Lead1 = lead(Above_Threshold, 1, default = FALSE),
     Lead2 = lead(Above_Threshold, 2, default = FALSE),
-    Start_Season_Flag = Above_Threshold & Lead1 & Lead2
+    Lead3 = lead(Above_Threshold, 3, default = FALSE),
+    Start_Season_Flag = Above_Threshold & Lead1 & Lead2 & Lead3
   ) %>%
   filter(Start_Season_Flag) %>%
   summarise(Start_of_Season = min(Date)) %>%
@@ -76,3 +77,33 @@ ggplot(start_of_season, aes(x = factor(Year), y = Day_of_Year)) +
   geom_boxplot() +
   labs(title = "Start of Season by Year", x = "Year", y = "Day of Year") +
   theme_minimal()
+start_of_season$Year <- as.numeric(start_of_season$Year)
+
+pixel_trends <- start_of_season %>%
+  group_by(x, y) %>%
+  do({
+    tryCatch({
+      mod <- lm(Day_of_Year ~ Year, data = .)
+      data.frame(Slope = coef(mod)["Year"], PValue = summary(mod)$coefficients["Year", "Pr(>|t|)"])
+    }, error = function(e) {
+      data.frame(Slope = NA, PValue = NA)  # Return NA values in case of an error
+    })
+  }) %>%
+  ungroup()
+
+results_sf <- st_as_sf(pixel_trends, coords = c("x", "y"), crs = 4326)
+results_significant <- results_sf[which(results_sf$PValue <= 0.05),]
+ggplot(results_significant) +
+  geom_sf(aes(color = Slope)) +
+  scale_color_gradient2(low = "blue", mid = "grey", high = "red", midpoint = 0) +
+  labs(title = "Trend Start of Season over Years for each pixel (p <= 0.05)", color = "Trend Coefficient") +
+  theme_minimal()
+
+# Assuming results_significant is an sf object with a "Slope" column
+map <- mapview(results_significant, 
+               zcol = "Slope",  
+               map.types = "OpenTopoMap")
+
+# Printing the map to display it
+print(map)
+
