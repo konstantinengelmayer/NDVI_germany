@@ -18,7 +18,9 @@ packagesToLoad <- c(
   "ggplot2",
   "zoo",
   "furrr",
-  "future"
+  "future",
+  "forecast",
+  "fda"
 )
 
 # define a project root folder
