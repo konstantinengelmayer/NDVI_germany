@@ -437,3 +437,72 @@ boxplot(sos_eos_apg_results_aut_min$PGT)
 hist(sos_eos_apg_results_aut_min$SOS, breaks=12)
 hist(sos_eos_apg_results_aut_min$EOS, breaks=12)
 hist(sos_eos_apg_results_aut_min$APG, breaks=12)
+
+
+
+
+
+
+
+######################################## TEST ##########################################
+calculate_sos_eos_apg_pgt <- function(df) {
+  if(nrow(df) == 0) return(data.frame(SOS = NA, EOS = NA, APG = NA, PGT = NA, NDVI_SOS = NA, NDVI_EOS = NA)) # Early return for empty groups
+  
+  # Initial calculations for APG and PGT
+  APG <- max(df$NDVI_Value_Smoothed, na.rm = TRUE)
+  PGT <- df$Date[which.max(df$NDVI_Value_Smoothed)]
+  
+  # Calculate NDVImin for EOS calculation as the minimum NDVI value observed after PGT till the end of the year
+  NDVImin_post_PGT <- ifelse(any(df$Date > PGT), min(df$NDVI_Value_Smoothed[df$Date > PGT], na.rm = TRUE), NA)
+  NDVImax <- APG
+  
+  # Adjust NDVImin to avoid using the start-of-year minimum for EOS calculation
+  NDVImin_for_ratio <- if(!is.na(NDVImin_post_PGT) && NDVImin_post_PGT > min(df$NDVI_Value_Smoothed, na.rm = TRUE)) {
+    NDVImin_post_PGT
+  } else {
+    min(df$NDVI_Value_Smoothed, na.rm = TRUE)
+  }
+  
+  df$NDVIratio <- (df$NDVI_Value_Smoothed - NDVImin_for_ratio) / (NDVImax - NDVImin_for_ratio)
+  
+  # SOS calculation based on four consecutive days above the threshold
+  df$above_threshold <- df$NDVIratio >= 0.5
+  sos <- calculate_threshold_crossing(df, TRUE, 4)
+  
+  # EOS calculation focusing on data after PGT, using adjusted NDVImin
+  eos <- if(!is.na(PGT)) {
+    df_post_PGT <- df %>% filter(Date >= PGT)
+    calculate_threshold_crossing(df_post_PGT, FALSE, 4)
+  } else {
+    NA
+  }
+  
+  # Extract NDVI values for SOS and EOS
+  NDVI_SOS <- if(!is.na(sos)) df$NDVI_Value_Smoothed[df$Date == sos] else NA
+  NDVI_EOS <- if(!is.na(eos)) df$NDVI_Value_Smoothed[df$Date == eos] else NA
+  
+  return(data.frame(SOS = sos, EOS = eos, APG = APG, PGT = PGT, NDVI_SOS = NDVI_SOS, NDVI_EOS = NDVI_EOS))
+}
+
+
+##################################
+
+# TODO: Apply the function to the filtered groups
+sos_eos_apg_results_sos_eos <- test_grouped_filtered %>%
+  group_by(x, y, Year) %>%
+  group_modify(~ calculate_sos_eos_apg_pgt(.)) %>%
+  ungroup()
+
+############################## visualize results ###############################
+
+str(sos_eos_apg_results_sos_eos)
+print(sos_eos_apg_results_sos_eos)
+boxplot(sos_eos_apg_results_sos_eos$SOS)
+boxplot(sos_eos_apg_results_sos_eos$EOS)
+boxplot(sos_eos_apg_results_sos_eos$APG)
+boxplot(sos_eos_apg_results_sos_eos$PGT)
+hist(sos_eos_apg_results_sos_eos$SOS, breaks=12)
+hist(sos_eos_apg_results_sos_eos$EOS, breaks=12)
+hist(sos_eos_apg_results_sos_eos$APG, breaks=12)
+hist(sos_eos_apg_results_sos_eos$NDVI_SOS, braks=12)
+hist(sos_eos_apg_results_sos_eos$NDVI_EOS, braks=12)
