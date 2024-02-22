@@ -18,13 +18,15 @@ selected_df <- df %>%
 
 df <- selected_df # calculate still with df
 
-
+str(df)
 ################################################################################
 # TODO: Filter pixel groups with less than 4 observations per season
 # Function to determine the season based on the month
 # This is a good previous filter. The second problematic group filter from the 
 # linear daily interpolation kicked 0.975% less groupes out because of this filter here!
 
+
+# Your existing functions and code
 getSeason <- function(month) {
   if (month %in% 3:5) {
     return("Spring")
@@ -37,30 +39,33 @@ getSeason <- function(month) {
   }
 }
 
-# Apply the function to create a new Season column
 df$Season <- sapply(month(df$Date), getSeason)
 
-##################### Winter Spanning ##########################################
-Year <- df$Year
+Year <- as.numeric(format(df$Date, "%Y"))
 
 df$SeasonYear <- ifelse(
   df$Season == "Winter" & month(df$Date) %in% c(11, 12),
-  paste(Year, as.numeric(Year) + 1, sep="-"),
+  paste(Year, Year + 1, sep="-"),
   ifelse(
     df$Season == "Winter" & month(df$Date) == 1,
-    paste(as.numeric(Year) - 1, Year, sep="-"),
-    Year
+    paste(Year - 1, Year, sep="-"),
+    as.character(Year)
   )
 )
-str(df)
 
-# Then group by this new SeasonYear column along with x, y, and Season
-# Filter the groups
-df <- df %>%
-  dplyr::group_by(Year, x, y, SeasonYear) %>%  
-  dplyr::filter(n() >= 4) %>%
-  dplyr::ungroup()
+# Adjusted filtering approach
+df_filtered <- df %>%
+  group_by(x, y, Season, SeasonYear) %>%
+  filter(!(Season == "Winter" & (SeasonYear == "2000-2001" | SeasonYear == "2022-2023"))) %>%
+  filter(n() >= 4 | (Season == "Winter" & (SeasonYear == "2000-2001" | SeasonYear == "2022-2023"))) %>%
+  ungroup()
 
+print(paste("Number of excluded observations during season filter:", nrow(df)-nrow(df_filtered)))
+
+
+# The df_filtered dataframe now should contain only the pixel groups 
+# with more than four observations per season, excluding specific conditions for Winter 2000 and Winter 2023.
+df <- df_filtered
 
 ############# Detect clouds ################################################
 # TODO: Detect mixed clouds and filter pixel
@@ -145,8 +150,38 @@ problematic_groups_df <- bind_rows(problematic_groups_list)
 # Print the number of excluded groups
 print(paste("Number of excluded pixel groups during sgolayfilter:", length(problematic_groups_list)))
 
-
 str(result_smoothed)
+
+############################### EXCLUDE GREEN WINTER ###########################
+
+# Step 1: Filter for Winter season and NDVI values above 0.7
+winter_high_ndvi <- result_smoothed %>%
+  filter(Season == "Winter" & NDVI_Value > 0.7)
+
+# Step 2 & 3: Group by pixel coordinates, then count unique years meeting the condition
+pixel_groups_high_ndvi <- winter_high_ndvi %>%
+  group_by(x, y) %>%
+  summarize(Unique_Winter_Years = n_distinct(Year)) %>%
+  filter(Unique_Winter_Years >= 5) %>%
+  ungroup()
+
+# Step 4: Create green_winter dataframe to INCLUDE these pixel groups
+# This dataframe will include only the records from pixel groups that met the exclusion criteria
+green_winter <- result_smoothed %>%
+  semi_join(pixel_groups_high_ndvi, by = c("x", "y"))
+
+# Step 5: Update result_smoothed to EXCLUDE these pixel groups
+# This dataframe will now exclude the pixel groups that met the criteria
+result_smoothed_updated <- result_smoothed %>%
+  anti_join(pixel_groups_high_ndvi, by = c("x", "y"))
+
+# Output the updated result_smoothed dataframe without the excluded pixel groups
+result_smoothed <- result_smoothed_updated
+
+# Print the first few rows of each dataframe to verify
+print(paste("Number of excluded observations during green winter filter:", nrow(result_smoothed)-nrow(green_winter)))
+
+
 ################################################################################
 ######################## fourier smoothing #####################################
 ######################## prepare data ##########################################
@@ -193,40 +228,54 @@ grouped <- result_smoothed %>%
 # Print the number of excluded pixel groups
 print(paste("Number of excluded pixel groups during daily interpolation:", excluded_groups_counter))
 
+str(grouped)
+unique(is.na(grouped$NDVI_Value))
+################################################################################
+
+# Step 1: Identify pixel groups with any NA values in NDVI_Value
+groups_with_na <- grouped %>%
+  group_by(x, y) %>%
+  filter(any(is.na(NDVI_Value))) %>%
+  summarise() %>%
+  ungroup()
+
+# Count the number of excluded pixel groups
+number_of_excluded_groups <- nrow(groups_with_na)
+
+# Step 2: Exclude these groups from the original dataframe
+grouped <- grouped %>%
+  anti_join(groups_with_na, by = c("x", "y"))
+
+# Print the count of excluded pixel groups
+print(paste("Number of excluded pixel groups with NA:", number_of_excluded_groups))
+
+# Now, 'grouped_cleaned' contains data without any pixel groups that had NA in NDVI_Value
+
+################################################################################
+
+# grouped$NDVI_SG_Filtered <- sgolayfilt(grouped$NDVI_Value, p = 3, n = 31)
+
+# Note: Ensure n is odd and > p; adjust p and n as needed based on experimentation
 
 ############################# create Fourier ###################################
-
-# TODO: Create the Fourier Smoother
-smooth_with_fourier <- function(df) {
-  if(nrow(df) < 2) {  # Ensure there are at least two rows to perform ts and fft
-    df$NDVI_Value_Smoothed <- NA
-    return(df)
+smooth_with_fourier <- function(ndvi_values, frequency = 365, components_to_keep = 6) {
+  if(length(ndvi_values) < 2) {  # Ensure there are at least two rows
+    return(rep(NA, length(ndvi_values)))
   }
-  ndvi_ts <- ts(df$NDVI_Value, frequency = 365)  # Adjust frequency as needed
-  # Apply Fourier transform
+  ndvi_ts <- ts(ndvi_values, frequency = frequency)
   fft_result <- fft(ndvi_ts)
-  # Determine the number of components to keep
-  components_to_keep <- 6  # Adjust based on your data ///// change!
-  # Safely zero out the middle coefficients, if possible
   n <- length(fft_result)
   if(components_to_keep < n / 2) {
     fft_result[(components_to_keep + 1):(n - components_to_keep)] <- 0
   }
-  # Inverse FFT to get the smoothed series
-  smoothed_ndvi <- Re(fft(fft_result, inverse = TRUE)) / length(fft_result)
-  # Add smoothed NDVI values to the dataframe
-  df$NDVI_Value_Smoothed <- smoothed_ndvi
-  
-  return(df)
+  smoothed_ndvi <- Re(fft(fft_result, inverse = TRUE)) / n
+  return(smoothed_ndvi)
 }
 
-
-# TODO: Apply the smoother: Fourier
-grouped_smoothed <- grouped %>%
+# Apply the smoother to each group
+ grouped_smoothed <- grouped %>%
   group_by(x, y, Year) %>%
-  group_modify(~ smooth_with_fourier(.))
-
-print(grouped_smoothed, n=20)
+  mutate(NDVI_Value_Smoothed = smooth_with_fourier(NDVI_Value, 365, 6))
 
 
 ################################################################################
@@ -295,8 +344,103 @@ sos_eos_apg_results <- grouped_smoothed %>%
 
 str(sos_eos_apg_results)
 print(sos_eos_apg_results)
-hist(sos_eos_apg_results$SOS, breaks=12)
+
+################################################################################
+
+clean_sos_eos_apg_results <- sos_eos_apg_results %>%
+  group_by(x, y) %>%
+  # Filter out groups with any NA values in any column
+  filter(!any(is.na(SOS), is.na(EOS), is.na(APG), is.na(PGT))) %>%
+  ungroup()
+
+print(paste("Number of excluded Pixel during EOS NA deleting filter:", nrow(sos_eos_apg_results)-nrow(clean_sos_eos_apg_results)))
+nrow(clean_sos_eos_apg_results)
+str(clean_sos_eos_apg_results)
+
+# Extract month from EOS date
+clean_sos_eos_apg_results <- clean_sos_eos_apg_results %>%
+  mutate(EOS_month = format(EOS, "%m"), # Extract month as a string
+         EOS_month = as.integer(EOS_month)) # Convert to integer for ordering
+
+# Extract month from SOS date
+clean_sos_eos_apg_results <- clean_sos_eos_apg_results %>%
+  mutate(SOS_month = format(SOS, "%m"), # Extract month as a string
+         SOS_month = as.integer(SOS_month)) # Convert to integer for ordering
+
+# Extract month from PGT date
+clean_sos_eos_apg_results <- clean_sos_eos_apg_results %>%
+  mutate(PGT_month = format(PGT, "%m"), # Extract month as a string
+         PGT_month = as.integer(PGT_month)) # Convert to integer for ordering
 
 
+sos_month_counts <- clean_sos_eos_apg_results %>%
+  count(SOS_month) %>%
+  rename(Month = SOS_month, SOS_Count = n)
+
+# Count the number of occurrences for each EOS month
+eos_month_counts <- clean_sos_eos_apg_results %>%
+  count(EOS_month) %>%
+  rename(Month = EOS_month, EOS_Count = n)
+
+pgt_month_counts <- clean_sos_eos_apg_results %>%
+  count(PGT_month) %>%
+  rename(Month = PGT_month, PGT_Count = n)
+
+# Sequentially joining the month counts
+month_counts <- sos_month_counts %>%
+  full_join(eos_month_counts, by = "Month") %>%
+  full_join(pgt_month_counts, by = "Month")
+
+# Replace NA with 0 for counts that don't appear in some datasets
+month_counts[is.na(month_counts)] <- 0
+
+# Print the result to check
+print(month_counts)
+
+saveRDS(month_counts, "~/edu/NDVI_germany/docs/month_count_fourier_smoother_0.05")
 
 
+df_f <- readRDS("~/edu/NDVI_germany/docs/month_count_fourier_smoother_0.05")
+df_f
+df_s <- readRDS("~/edu/NDVI_germany/docs/month_count_Savitzky_0.05")
+df_s
+df_n <- readRDS("~/edu/NDVI_germany/docs/month_count_no_daily_smoother_0.05")
+df_n
+str(df_n)
+
+total_eos_count_f <- sum(df_f$EOS_Count)
+total_eos_count_s <- sum(df_s$EOS_Count)
+total_eos_count_n <- sum(df_n$EOS_Count)
+# Print the total count of EOS_Count values
+print(paste("Total EOS_Count values:", total_eos_count_f, total_eos_count_s, total_eos_count_n))
+
+
+filtered_sos_eos_apg_results <- clean_sos_eos_apg_results %>%
+  filter(!(EOS_month %in% c(1, 2, 3, 4, 5, 12))) %>%
+  filter(!(SOS_month %in% c(1, 7, 8, 9, 10, 11)))
+  
+filtered_sos_eos_apg_results
+saveRDS(filtered_sos_eos_apg_results, "~/edu/NDVI_germany/docs/sos_eos_cleaned_filtered_fourier")
+
+sos_month_counts <- filtered_sos_eos_apg_results %>%
+  count(SOS_month) %>%
+  rename(Month = SOS_month, SOS_Count = n)
+
+# Count the number of occurrences for each EOS month
+eos_month_counts <- filtered_sos_eos_apg_results %>%
+  count(EOS_month) %>%
+  rename(Month = EOS_month, EOS_Count = n)
+
+pgt_month_counts <- filtered_sos_eos_apg_results %>%
+  count(PGT_month) %>%
+  rename(Month = PGT_month, PGT_Count = n)
+
+month_counts <- sos_month_counts %>%
+  full_join(eos_month_counts, by = "Month") %>%
+  full_join(pgt_month_counts, by = "Month")
+
+# Replace NA with 0 for counts that don't appear in some datasets
+month_counts[is.na(month_counts)] <- 0
+
+# Print the result to check
+print(month_counts)

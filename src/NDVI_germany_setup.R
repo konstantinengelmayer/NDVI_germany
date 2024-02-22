@@ -4,23 +4,24 @@ packagesToLoad <- c(
   "terra",
   "reticulate",
   "sf",
+  "stars",
+  "signal",
+  "stringr",
   "osmdata",
   "rsample",
   "tfdatasets",
   "purrr",
-  "stars",
   "magick",
   "mapview",
   "lubridate",
-  "dplyr",
   "tidyr",
-  "stringr",
   "ggplot2",
-  "zoo",
   "furrr",
   "future",
   "forecast",
-  "fda"
+  "fda",
+  "dplyr",
+  "zoo"
 )
 
 # define a project root folder
