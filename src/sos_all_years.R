@@ -1,95 +1,201 @@
 # Load NDVI Data
 source("~/edu/NDVI_germany/src/NDVI_germany_setup.R")
-data <- readRDS("~/value_for_at_least_10_months.rds")
+data <- readRDS(file.path(envrmt$path_data_level1, "value_march_to_october.rds"))
 
-# Prepare Date Sequences for Each Year
+# Prepare date Sequences for Each Year
 # This generates a sequence of dates for every year present in the dataset
 years <- unique(data$Year)
 date_sequences <- lapply(years, function(year) {
   seq(ymd(paste(year, "01-01", sep = "-")), ymd(paste(year, "12-31", sep = "-")), by = "day")
 })
 
+data <- data %>%
+  arrange(x, y, date) %>%
+  group_by(x, y) %>%
+  mutate(NDVI_Value = sgolayfilt(NDVI_Value, p = 3, n = 9)) %>%
+  ungroup()
+
+data <- data %>%
+  mutate(NDVI_Value = if_else(NDVI_Value < 0.3, NA, NDVI_Value)) #%>%
+  #group_by(x, y, Year) %>% # Group by pixel and year
+  #mutate(
+  #  Prev_NDVI = lag(NDVI_Value), # Get previous NDVI value within the same year
+  #  Next_NDVI = lead(NDVI_Value), # Get next NDVI value within the same year
+  #  Remove = (Prev_NDVI - NDVI_Value >= 0.1) & (Next_NDVI - NDVI_Value >= 0.1), # Condition to check within the same year
+  #  NDVI_Value = ifelse(Remove, NA, NDVI_Value) # Mark sudden drops as NA within the same year
+  #) %>%
+  #dplyr::select(-Prev_NDVI, -Next_NDVI, -Remove) %>% # Remove auxiliary columns
+  #ungroup() # Remove the grouping
+data <- data[-which(is.na(data$NDVI_Value)),]
+
+pixels_to_exclude <- data %>%
+  dplyr::filter(Month %in% c(12, 1, 2), NDVI_Value > 0.6) %>% # Filter for high NDVI in winter
+  group_by(x, y) %>%
+  summarise(Num_Years = n_distinct(Year)) %>% # Count distinct years meeting the condition
+  dplyr::filter(Num_Years >= 4) %>%
+  dplyr::select(-Num_Years)
+
+data<- data %>%
+  anti_join(pixels_to_exclude, by = c("x", "y"))
+
+df_monthly <- data %>%
+  group_by(Year, x, y, Month) %>%
+  summarise(Count = n(), .groups = 'drop') 
+
+df_filtered <- df_monthly %>%
+  group_by(Year, x, y) %>%
+  dplyr::filter(all(c(3, 4, 5, 6, 7, 8, 9, 10) %in% Month)) %>%
+  summarise(Months_with_data = n_distinct(Month), .groups = 'drop') 
+
+data <- data %>%
+  left_join(df_filtered, by = c("Year", "x", "y")) %>%
+  dplyr::filter(!is.na(Months_with_data)) %>%
+  dplyr::select(-Months_with_data)
 # Adjusted pipeline with progress bar for the date expansion part
 data_expanded <- data %>%
   dplyr::select(Year, x, y) %>%
   distinct() %>%
   ungroup() %>%
-  mutate(Date = pblapply(Year, function(year) {
+  mutate(date = pblapply(Year, function(year) {
     seq(ymd(paste0(year, "-01-01")), ymd(paste0(year, "-12-31")), by = "day")
   })) %>%
-  unnest(Date) %>%
-  left_join(data, by = c("Year", "x", "y", "Date"))
+  unnest(date) %>%
+  left_join(data, by = c("Year", "x", "y", "date"))
 
 
 # Interpolate NDVI Values for Each Pixel
 # Fills in missing NDVI values linearly for days without data
 data_interpolated <- data_expanded %>%
   group_by(Year, x, y) %>%
-  arrange(Date, .by_group = TRUE) %>%
-  mutate(NDVI_Value = approx(Date, NDVI_Value, Date, method = "linear")$y) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(NDVI_Value = approx(date, NDVI_Value, date, method = "linear")$y) %>%
   ungroup()
-
+gc()
 # Apply Fourier Smoothing Across All Years
 # Smoothes NDVI values using Fourier terms and linear regression
-data_smoothed <- data_interpolated %>%
-  group_by(Year, x, y) %>%
-  do({
-    ndvi_values <- .$NDVI_Value
-    time_points <- seq_along(ndvi_values)
-    K <- 3  # Number of harmonics for Fourier transform
-    fourier_terms <- forecast::fourier(ts(ndvi_values, frequency = 365), K = K)
-    fit <- lm(ndvi_values ~ fourier_terms)
-    smoothed_values <- predict(fit, newdata = list(fourier_terms = fourier_terms))
-    data.frame(Date = .$Date, NDVI_Smooth = as.numeric(smoothed_values), stringsAsFactors = FALSE)
-  }) %>%
+#data_smoothed <- data_interpolated %>%
+#  group_by(Year, x, y) %>%
+#  do({
+#    ndvi_values <- .$NDVI_Value
+#    time_points <- seq_along(ndvi_values)
+#    K <- 3  # Number of harmonics for Fourier transform
+#    fourier_terms <- forecast::fourier(ts(ndvi_values, frequency = 365), K = K)
+#    fit <- lm(ndvi_values ~ fourier_terms)
+#    smoothed_values <- predict(fit, newdata = list(fourier_terms = fourier_terms))
+#    data.frame(date = .$date, NDVI_Smooth = as.numeric(smoothed_values), stringsAsFactors = FALSE)
+#  }) %>%
+#  ungroup()
+#rm(data_interpolated)
+#gc()
+
+pixel_min_max <- data_interpolated %>%
+  group_by(x, y) %>%
+  summarise(
+    Global_Min_NDVI = min(NDVI_Value, na.rm = TRUE),
+    Global_Max_NDVI = max(NDVI_Value, na.rm = TRUE)
+  ) %>%
   ungroup()
 
-# Normalize Smoothed NDVI Values Across All Years
-data_normalized <- data_smoothed %>%
-  group_by(Year, x, y) %>%
+data_normalized <- data_interpolated %>%
+  left_join(pixel_min_max, by = c("x", "y")) %>%
   mutate(
-    Min_NDVI = min(NDVI_Smooth, na.rm = TRUE),
-    Max_NDVI = max(NDVI_Smooth, na.rm = TRUE),
-    Norm_NDVI = (NDVI_Smooth - Min_NDVI) / (Max_NDVI - Min_NDVI)
+    # Normalize NDVI values based on the global min and max for each pixel
+    Norm_NDVI = (NDVI_Value - Global_Min_NDVI) / (Global_Max_NDVI - Global_Min_NDVI)
   ) %>%
-  ungroup() %>%
-  dplyr::select(-Min_NDVI, -Max_NDVI)
+  dplyr::select(-Global_Min_NDVI, -Global_Max_NDVI)
+# Normalize Smoothed NDVI Values Across All Years
 
+gc()
 # Identify Start of Season for Each Pixel Across All Years
 # The start of the season is defined as the first date where normalized NDVI exceeds 0.5 for 3 consecutive days
-season_dates <- data_normalized %>%
+SoS_dates <- data_normalized %>%
   group_by(Year, x, y) %>%
   mutate(
-    # Start of Season (SoS) calculation
     Above_Threshold_SoS = Norm_NDVI > 0.5,
     Lead1_SoS = lead(Above_Threshold_SoS, 1, default = FALSE),
     Lead2_SoS = lead(Above_Threshold_SoS, 2, default = FALSE),
     Lead3_SoS = lead(Above_Threshold_SoS, 3, default = FALSE),
-    Start_Season_Flag = Above_Threshold_SoS & Lead1_SoS & Lead2_SoS & Lead3_SoS,
-    Start_of_Season = if_else(Start_Season_Flag, Date, as.Date(NA)),
-    Start_of_Season = min(Start_of_Season, na.rm = TRUE),
-    
-    # Preparing for End of Season (EoS) calculation
-    # Filter within mutate to avoid affecting Start_of_Season calculation
-    Below_Threshold_EoS = if_else(month(Date) %in% c(8, 9, 10, 11) & !is.na(Start_of_Season), Norm_NDVI < 0.5, FALSE),
+    Start_Season_Flag = Above_Threshold_SoS & Lead1_SoS & Lead2_SoS & Lead3_SoS
+  ) %>%
+  summarise(
+    Start_of_Season = min(if_else(Start_Season_Flag, date, as.Date(NA)), na.rm = TRUE)
+  ) %>%
+  dplyr::filter(!is.na(Start_of_Season))
+
+peak_NDVI_dates <- data_normalized %>%
+  group_by(Year, x, y) %>%
+  # Identify the date of peak NDVI
+  summarise(Peak_NDVI_Date = date[which.max(Norm_NDVI)]) %>%
+  ungroup()
+
+# Join peak NDVI dates back to the original dataset for reference
+data_with_peak <- data_normalized %>%
+  left_join(peak_NDVI_dates, by = c("Year", "x", "y"))
+
+# Calculate End of Season based on conditions after peak NDVI
+EoS_dates <- data_with_peak %>%
+  group_by(Year, x, y) %>%
+  mutate(
+    # Ensure we only consider dates after the peak NDVI date for EoS calculation
+    Post_Peak = date > Peak_NDVI_Date,
+    Below_Threshold_EoS = Norm_NDVI < 0.5 & Post_Peak,
     Lead1_EoS = lead(Below_Threshold_EoS, 1, default = FALSE),
     Lead2_EoS = lead(Below_Threshold_EoS, 2, default = FALSE),
     Lead3_EoS = lead(Below_Threshold_EoS, 3, default = FALSE),
     End_Season_Flag = Below_Threshold_EoS & Lead1_EoS & Lead2_EoS & Lead3_EoS
   ) %>%
-  group_by(Year, x, y) %>%
   summarise(
-    Start_of_Season = first(Start_of_Season),
-    End_of_Season = if_else(any(End_Season_Flag), min(Date[End_Season_Flag]), as.Date(NA))
+    # Find the earliest date after the peak where the End_Season_Flag is TRUE
+    End_of_Season = if_else(any(End_Season_Flag), min(date[End_Season_Flag], na.rm = TRUE), as.Date(NA))
   ) %>%
+  dplyr::filter(!is.na(End_of_Season)) %>%
   ungroup()
-season_dates <- season_dates[-which(is.na(season_dates$Start_of_Season)|is.na(season_dates$End_of_Season)),]
+
+
+season_dates <- left_join(SoS_dates, EoS_dates, by = c("Year", "x", "y"))
 season_dates <- season_dates %>%
   mutate(
     SoS_Day_of_Year = yday(Start_of_Season),
     EoS_Day_of_Year = yday(End_of_Season)
   )
 cor.test(season_dates$SoS_Day_of_Year,season_dates$EoS_Day_of_Year)
+
+season_dates <- season_dates %>%
+  mutate(
+    SoS_Month = month(Start_of_Season),
+    EoS_Month = month(End_of_Season)
+  )
+# Summarize Start of Season by month
+SoS_summary <- season_dates %>%
+  group_by(SoS_Month = month(Start_of_Season, label = TRUE, abbr = FALSE)) %>%
+  summarise(SoS_Count = n()) %>%
+  ungroup()
+
+# Summarize End of Season by month
+EoS_summary <- season_dates %>%
+  group_by(EoS_Month = month(End_of_Season, label = TRUE, abbr = FALSE)) %>%
+  summarise(EoS_Count = n()) %>%
+  ungroup()
+
+# Combine SoS and EoS summaries into one dataframe
+month_summary <- full_join(SoS_summary, EoS_summary, by = c("SoS_Month" = "EoS_Month")) %>%
+  rename(Month = SoS_Month) %>%
+  mutate(SoS_Count = replace_na(SoS_Count, 0),
+         EoS_Count = replace_na(EoS_Count, 0)) %>%
+  slice(c(1:10, 12:n(), 11))
+
+ndvi_peak <- data_interpolated %>%
+  group_by(Year, x, y) %>%
+  summarise(Peak_NDVI = max(NDVI_Value, na.rm = TRUE),
+            Date_of_Peak = date[which.max(NDVI_Value)],
+            .groups = 'drop') # Ensure the dataframe is ungrouped after summarise
+
+# Now, join ndvi_peak with season_dates to add the peak NDVI information
+season_dates <- season_dates %>%
+  left_join(ndvi_peak, by = c("Year", "x", "y"))
+
+# View the first few rows of the updated season_dates dataframe
+head(season_dates)
 
 plot_data <- season_dates %>%
   mutate(
@@ -174,5 +280,9 @@ mapview(results_significant_eos,
         map.types = "OpenTopoMap")
 
 
-saveRDS(data_normalized, "~/normalized_NDVI_10_month.rds")
-saveRDS(season_dates, "~/season_date.rds")
+saveRDS(data_normalized, file.path(envrmt$path_data_level1, "normalized_with_filter.rds"))
+saveRDS(season_dates, file.path(envrmt$path_data_level1, "season_date_with_filter.rds"))
+season_dates <- readRDS("~/season_date.rds")
+
+
+
