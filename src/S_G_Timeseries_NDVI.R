@@ -1,14 +1,4 @@
-################################################################################
-# get a random pixel for fast test calculation
-set.seed(99)
-unique_pixel <- df %>% distinct(x, y) %>% sample_n(1)
-# Filter the main dataframe to include only the selected pixel group
-df_random_group <- df %>%
-  filter(x == unique_pixel$x & y == unique_pixel$y)
-nrow(df_random_group)
-dfp <- df_random_group
-
-
+# Written by Malte Date: 16.03.2024
 ## NDVI timeseries with Savitzky-Golay Filter & Cloud interpolation ############
 
 ################################################################################
@@ -16,7 +6,8 @@ dfp <- df_random_group
 df <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/long_ndvi_quality_df.rds") 
 str(df)
 ################################################################################
-# Step 0: Preprocessing
+# TODO: Preprocessing
+# Step 1: Preprocessing
 
 # Define the conversion function
 to_binary_string <- function(number, bits = 16) {
@@ -32,12 +23,12 @@ to_binary_string <- function(number, bits = 16) {
 # Apply the function to the 'Quality' column of your dataframe
 df$Quality_Binary = sapply(df$Quality, to_binary_string, bits = 15)
 df$Quality <- NULL
-head(df)
 str(df)
 
 
 ################################################################################
-# filter the values
+# TODO: Exclude bad pixel values
+# filter the values, but let the clouds in the data
 result_df <- df %>%
   dplyr::filter(
     str_sub(Quality_Binary, 1, 2) != "11" & # exclude all not produced observations
@@ -66,11 +57,12 @@ result_df$Clouds <- as.numeric(result_df$Clouds)
 
 
 ################################################################################
-# Delete all pixel groups with years with too many clouds or too less observations
+# Step 2: 
+# TODO: Delete all pixel groups with years with too many clouds or too less observations
 # Convert Year to Date
 result_df$Year <- as.Date(result_df$Year)
 
-# Step 1: Filter pixel groups with at least 17 observations in a year
+# Filter pixel groups with at least 17 observations in a year
 df_filtered <- result_df %>%
   group_by(x, y, Year_group = floor_date(Year, "year")) %>%
   filter(n() >= 17) %>%
@@ -79,7 +71,7 @@ df_filtered <- result_df %>%
 
 str(df_filtered)
 
-# Step 2: Remove pixel groups with two or more consecutive cloud observations from March to November
+# Remove pixel groups with two or more consecutive cloud observations from March to November
 df_final <- df_filtered %>%
   group_by(x, y) %>%
   mutate(Clouds_lag = lag(Clouds), # Create a lag column for Clouds to identify consecutive cloud observations
@@ -91,8 +83,8 @@ df_final <- df_filtered %>%
 str(df_final)
 
 ################################################################################
-# Step 1
-# Replace NDVI_Value with NA for cloudy observations and create lin_int for linear interpolation
+# Step 3
+# TODO: Replace NDVI_Value with NA for cloudy observations and create lin_int for linear interpolation
 df_final <- df_final %>%
   group_by(x, y) %>%
   mutate(lin_int = ifelse(Clouds == 1, NA, NDVI_Value)) %>% # Replace cloudy NDVI values with NA
@@ -102,12 +94,12 @@ df_final <- df_final %>%
 str(df_final)
 
 # saveRDS(df_final, "~/edu/NDVI_germany/data/raster_data/data_level1/cloud_interpolation.rds")
-df_final <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/cloud_interpolation.rds")
-
+# df_final <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/cloud_interpolation.rds")
 
 
 ################################################################################
-# Apply the long term Savitzky-Golay Filter
+# Step 4
+# TODO: Apply the long term Savitzky-Golay Filter
 # Function to apply Savitzky-Golay filter to a vector
 
 apply_savgol <- function(vec, m = 5, d = 3) {
@@ -136,6 +128,8 @@ str(df_final)
 
 
 ################################################################################
+# Step 5
+# TODO: Weights
 # Create the weights for the NDVI Values that has been changed through the previous Savitzky-Golay filter
 
 df_final <- df_final %>%
@@ -147,16 +141,20 @@ df_final <- df_final %>%
 
 
 ################################################################################
+# Step 6
+# TODO: 16 day time-series
 # Create a new NDVI time-series with the weights and the Savitzky-Golay Filter
 
 df_final <- df_final %>%
   mutate(Adjusted_NDVI = (lin_int * weight + Savitzky * (1 - weight)))
 
 # saveRDS(df_final, "~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_long_term.rds")
-df_final <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_long_term.rds")
+# df_final <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_long_term.rds")
 str(df_final)
 ################################################################################
-df_final$Quality_Binary <- NULL
+# Step 7
+# TODO: Fit the adjusted NDVI values
+df_final$Quality_Binary <- NULL # delete the quality coloumn
 
 # Iterative fitting process where k = the number of iterations
 
@@ -170,57 +168,58 @@ df_final <- df_final %>%
 str(df_final)
 
 ################################################################################
+# Step 8
+# TODO: Fit the fitted NDVI values iteratively
 # Iterative fitting with exit criteria
-# Initialize variables for iteration
-# Initialize variables for iteration
-# Set parameters for Savitzky-Golay filter
-p <- 6
-n <- 9
 
-# Initialize Final_NDVI with Fitted_NDVI before the loop
-df_final <- df_final %>%
-  mutate(Final_NDVI = Fitted_NDVI)
+library(pracma) # For sgolayfilt function
 
-k <- 1
-max_iterations <- 10 # To prevent infinite loops
-fitting_effect_indices <- numeric(max_iterations) # Store fitting-effect indices
-
-for (iter in 1:max_iterations) {
-  # Apply the Savitzky-Golay filter for the current iteration to Final_NDVI
-  df_final <- df_final %>%
-    group_by(x, y) %>%
-    mutate(Final_NDVI = sgolayfilt(Final_NDVI, p, n)) %>%
-    ungroup()
+# Define the custom function for iterative fitting
+iterative_fitting <- function(data) {
+  # Parameters for Savitzky-Golay filter
+  p <- 6
+  n <- 9
+  max_iterations <- 10 # Maximum number of iterations
   
-  # Calculate the fitting-effect index (Fk) for the current iteration using Final_NDVI and lin_int
-  df_final <- df_final %>%
-    mutate(temp_fitting_effect = abs(Final_NDVI - lin_int) * weight)
+  # Initialize Final_NDVI with Fitted_NDVI
+  data$Final_NDVI <- data$Fitted_NDVI
   
-  Fk <- sum(df_final$temp_fitting_effect, na.rm = TRUE) # Summarize over all pixels
-  fitting_effect_indices[iter] <- Fk
-  
-  # Check exit condition
-  if (iter > 1 && (fitting_effect_indices[iter] >= fitting_effect_indices[iter-1] || iter >= max_iterations)) {
-    message("Exiting at iteration: ", iter)
-    break # Exit the loop if Fk does not decrease or max iterations reached
+  # Loop for iterative fitting
+  for (iter in 1:max_iterations) {
+    # Apply the Savitzky-Golay filter for the current iteration
+    data$Final_NDVI <- sgolayfilt(data$Final_NDVI, p, n)
+    
+    # Calculate the fitting-effect index (Fk) for the current iteration
+    temp_fitting_effect <- abs(data$Final_NDVI - data$lin_int) * data$weight
+    Fk <- sum(temp_fitting_effect, na.rm = TRUE) # Summarize over this pixel group
+    
+    # Check exit condition for this group based on Fk
+    if (iter > 1 && Fk >= prev_Fk) {
+      break # Exit loop if Fk does not decrease
+    }
+    prev_Fk <- Fk # Store Fk for comparison in the next iteration
   }
+  
+  return(data)
 }
 
-# Cleanup after the loop, removing the temporary fitting effect calculation column
+# Apply the iterative fitting process to each pixel group separately
 df_final <- df_final %>%
-  select(-temp_fitting_effect)
+  group_by(x, y) %>%
+  group_modify(~ iterative_fitting(.x)) %>%
+  ungroup()
 
-str(df_final)
+# After this, `df_final` contains the Final_NDVI after iterative fitting for each pixel group
 
-#saveRDS(df_final, "~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_iterative.rds")
-df_Savitzky <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_iterative.rds")
-str(df_Savitzky)
+# saveRDS(df_final, "~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_iterative.rds")
+# df_final <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_iterative.rds")
 
 
 ################################################################################
-df_Savitzky$Date <- as.Date(df_Savitzky$Year)
-df_Savitzky$Year <- format(df_Savitzky$Year, "%Y")
-head(df_Savitzky) # Have a look
+df_final$Date <- as.Date(df_final$Year)
+df_final$Year <- format(df_final$Year, "%Y")
+str(df_final) # Have a look
+################################################################################
 ############################### EXCLUDE GREEN WINTER ###########################
 
 getSeason <- function(month) {
@@ -235,12 +234,11 @@ getSeason <- function(month) {
   }
 }
 
-df_Savitzky$Season <- sapply(month(df_Savitzky$Date), getSeason)
-
+df_final$Season <- sapply(month(df_final$Date), getSeason)
 
 # Step 1: Filter for Winter season and NDVI values above 0.7
-winter_high_ndvi <- df_Savitzky %>%
-  filter(Season == "Winter" & Final_NDVI > 0.7)
+winter_high_ndvi <- df_final %>%
+  filter(Season == "Winter" & Final_NDVI > 0.6)
 
 # Step 2 & 3: Group by pixel coordinates, then count unique years meeting the condition
 pixel_groups_high_ndvi <- winter_high_ndvi %>%
@@ -251,27 +249,73 @@ pixel_groups_high_ndvi <- winter_high_ndvi %>%
 
 # Step 4: Create green_winter dataframe to INCLUDE these pixel groups
 # This dataframe will include only the records from pixel groups that met the exclusion criteria
-green_winter <- df_Savitzky %>%
+green_winter <- df_final %>%
   semi_join(pixel_groups_high_ndvi, by = c("x", "y"))
 
-# Step 5: Update df_Savitzky to EXCLUDE these pixel groups
+# Step 5: Update df_final to EXCLUDE these pixel groups
 # This dataframe will now exclude the pixel groups that met the criteria
-df_savitzky_updated <- df_Savitzky %>%
+df_savitzky_updated <- df_final %>%
   anti_join(pixel_groups_high_ndvi, by = c("x", "y"))
 
-# Output the updated df_Savitzky dataframe without the excluded pixel groups
-df_Savitzky <- df_savitzky_updated
+# Output the updated df_final dataframe without the excluded pixel groups
+df_final <- df_savitzky_updated
 
-# Print the first few rows of each dataframe to verify
-print(paste("Number of excluded observations during green winter filter:", nrow(df_Savitzky)-nrow(green_winter)))
+print(paste("Number of excluded observations during green winter filter:", nrow(df_final)-nrow(green_winter)))
+
+# Save file:
+saveRDS(df_final, "~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_without_green_winter.rds")
+# df_final <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_without_green_winter.rds")
+str(df_final)
 
 ################################################################################
+################################################################################
+# Evaluate the NDVI time-series with one pixel:
 
+set.seed(102)
+unique_pixel <- df_final %>% distinct(x, y) %>% sample_n(1)
+# Filter the main dataframe to include only the selected pixel group
+dfp <- df_final %>%
+  filter(x == unique_pixel$x & y == unique_pixel$y)
+
+################## PLOT ########################################################
+# Filter the dataframe for the year xxxx
+dfp_xxxx <- dfp %>%
+  filter(as.Date(Date) >= as.Date("2013-01-01") & as.Date(Date) <= as.Date("2013-12-31"))
+
+# Plotting the Original and the interpolated and the smoothed data
+ggplot(dfp_xxxx, aes(x = Date)) +
+  geom_line(aes(y = NDVI_Value, color = "Original NDVI"), linewidth=1) +
+  geom_line(aes(y = lin_int, color = "Interpolated NDVI"), linewidth=1) +
+  geom_line(aes(y = Savitzky, color = "Smoothed NDVI"), linewidth=1) +
+  scale_color_manual(values = c("Original NDVI" = "blue", 
+                                "Interpolated NDVI" = "green", 
+                                "Smoothed NDVI" = "red")) +
+  labs(title = "NDVI Values through one Year", 
+       y = "NDVI Value", 
+       color = "Legend") +
+  theme_minimal()
+
+# Plotting the original and the different steps of Savitzky smoothig
+ggplot(dfp_xxxx, aes(x = Date)) +
+  geom_line(aes(y = NDVI_Value, color ="Original NDVI"), linewidth=0.8) +
+  geom_line(aes(y = Adjusted_NDVI, color = "Adjusted_NDVI"), linewidth=0.9) +
+  geom_line(aes(y = Fitted_NDVI, color = "Fitted_NDVI"), linewidth=1.1) +
+  geom_line(aes(y = Final_NDVI, color = "Final_NDVI"), linewidth=1.2) +
+  scale_color_manual(values = c("Adjusted_NDVI" = "blue", 
+                                "Fitted_NDVI" = "green", 
+                                "Final_NDVI" = "red",
+                                "Original NDVI" = "grey")) +
+  labs(title = "NDVI Values through one Year", 
+       y = "NDVI Value", 
+       color = "Legend") +
+  theme_minimal()
+
+################################################################################
+################################################################################
 
 # TODO: Create a sequence of daily dates covering the range in your data
-seq_dates <- seq(from = min(df_Savitzky$Date), to = max(df_Savitzky$Date), by = "day")
+seq_dates <- seq(from = min(df_final$Date), to = max(df_final$Date), by = "day")
 head(seq_dates)
-
 
 # Initialize a counter for excluded groups
 excluded_groups_counter <- 0
@@ -291,7 +335,7 @@ safe_interpolate <- function(dates, values, seq_dates) {
 }
 
 # Apply the safe interpolation function within group_modify
-grouped <- df_Savitzky %>%
+grouped <- df_final %>%
   group_by(x, y, Year) %>%
   group_modify(~ {
     # Create a sequence of daily dates for the current year
@@ -334,102 +378,42 @@ print(paste("Number of excluded pixel groups with NA:", number_of_excluded_group
 # saveRDS(grouped, "~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_iterative_daily.rds")
 grouped <- readRDS("~/edu/NDVI_germany/data/raster_data/data_level1/Savitzky_iterative_daily.rds")
 
-################################################################################
-# Create a test dataset to calculate just with xx%
-unique_pixel_groups <- grouped %>%
-  distinct(x, y)
-
-# select xx% of these pixel groups
-set.seed(12) # Setting seed for reproducibility
-selected_pixel_groups <- unique_pixel_groups %>%
-  sample_frac(0.10
-  )
-
-# Filter the original dataframe to only include data from the selected pixel groups
-selected_df <- grouped %>%
-  semi_join(selected_pixel_groups, by = c("x", "y"))
-
-grouped <- selected_df # calculate still with df
-
-str(grouped)
 
 ################################################################################
 ########################## CALCULATE SOS EOS APG ###############################
-calculate_sos_eos_apg_pgt_v2 <- function(df) {
-  # Initialize return values
-  sos <- NA
-  eos <- NA
-  sos_ndvi_value <- NA
-  eos_ndvi_value <- NA
-  
-  # Calculate APG (Annual Peak Greenness) and PGT (Peak Greenness Time)
-  APG <- max(df$NDVI_Value, na.rm = TRUE)
-  PGT <- df$Date[which.max(df$NDVI_Value)]
-  
-  # Calculate SOS
-  sos_threshold_exceeded <- rollapply(df$NDVI_Value, width = 2, FUN = function(x) all(x > 0.71056), partial = TRUE, align = "left")
-  sos_index <- which(sos_threshold_exceeded == TRUE)[1]  # First occurrence
-  if (!is.na(sos_index)) {
-    sos <- df$Date[sos_index]
-    sos_ndvi_value <- df$NDVI_Value[sos_index]
-  }
-  
-  # Filtering data after PGT for EOS calculation
-  df_post_PGT <- df %>% filter(Date > PGT)
-  
-  if (nrow(df_post_PGT) > 0) {
-    eos_threshold_exceeded <- rollapply(df_post_PGT$NDVI_Value, width = 2, FUN = function(x) all(x < 0.70309), partial = TRUE, align = "left")
-    eos_index <- which(eos_threshold_exceeded == TRUE)[1]  # First occurrence after PGT
-    if (!is.na(eos_index)) {
-      eos <- df_post_PGT$Date[eos_index]
-      eos_ndvi_value <- df_post_PGT$NDVI_Value[eos_index]
-    }
-  }
-  
-  return(data.frame(SOS = sos, EOS = eos, APG = APG, PGT = PGT, sos_ndvi_value = sos_ndvi_value, eos_ndvi_value = eos_ndvi_value))
-}
-
-# Apply the function to each group
-sos_eos_apg_results_v2 <- grouped %>%
-  group_by(x, y, Year) %>%
-  group_modify(~ calculate_sos_eos_apg_pgt_v2(.x)) %>%
-  ungroup()
-
-sos <- sos_eos_apg_results_v2
-
 
 ################################################################################
 # Calculate SOS & EOS with !!!!! pixelwise !!!!! local threshold:
 calculate_sos_eos_apg_pgt_v2 <- function(df) {
-  # Early return for empty groups
-  if(nrow(df) == 0) return(data.frame(SOS = NA, EOS = NA, APG = NA, PGT = NA, sos_ndvi_value = NA, eos_ndvi_value = NA))
-  
+    # Early return for empty groups
+   if(nrow(df) == 0) return(data.frame(SOS = NA, EOS = NA, APG = NA, PGT = NA, sos_ndvi_value = NA, eos_ndvi_value = NA))
+    
   NDVImax <- max(df$NDVI_Value, na.rm = TRUE)
   NDVImin <- min(df$NDVI_Value, na.rm = TRUE)
-  
-  # Guard clause for infinite values or identical min and max
-  if(is.infinite(NDVImax) || is.infinite(NDVImin) || NDVImax == NDVImin) {
+    
+    # Guard clause for infinite values or identical min and max
+   if(is.infinite(NDVImax) || is.infinite(NDVImin) || NDVImax == NDVImin) {
     return(data.frame(SOS = NA, EOS = NA, APG = NA, PGT = NA, sos_ndvi_value = NA, eos_ndvi_value = NA))
   }
-  
-  # Normalize NDVI values for the pixel group
+    
+    # Normalize NDVI values for the pixel group
   df$NDVIratio <- (df$NDVI_Value - NDVImin) / (NDVImax - NDVImin)
-  
-  # Calculate APG (Annual Peak Greenness) and PGT (Peak Greenness Time)
+    
+    # Calculate APG (Annual Peak Greenness) and PGT (Peak Greenness Time)
   APG <- NDVImax
   PGT <- df$Date[which.max(df$NDVI_Value)]
-  
-  # Determine SOS based on normalized threshold
-  sos_index <- which(df$NDVIratio >= 0.5 & lag(df$NDVIratio, default = first(df$NDVIratio)) < 0.5)[1]
-  if (!is.na(sos_index)) {
+    
+    # Determine SOS based on normalized threshold
+   sos_index <- which(df$NDVIratio >= 0.5 & lag(df$NDVIratio, default = first(df$NDVIratio)) < 0.5)[1]
+   if (!is.na(sos_index)) {
     sos <- df$Date[sos_index]
     sos_ndvi_value <- df$NDVI_Value[sos_index]
   } else {
     sos <- NA
     sos_ndvi_value <- NA
   }
-  
-  # Filter data after PGT for EOS calculation and apply the same normalization logic
+    
+    # Filter data after PGT for EOS calculation and apply the same normalization logic
   df_post_PGT <- df %>% filter(Date > PGT)
   if (nrow(df_post_PGT) > 0) {
     eos_index <- which(df_post_PGT$NDVIratio < 0.5 & lag(df_post_PGT$NDVIratio, default = first(df_post_PGT$NDVIratio)) >= 0.5)[1]
@@ -443,7 +427,7 @@ calculate_sos_eos_apg_pgt_v2 <- function(df) {
   } else {
     eos <- NA
     eos_ndvi_value <- NA
-  }
+    }
   
   return(data.frame(SOS = sos, EOS = eos, APG = APG, PGT = PGT, sos_ndvi_value = sos_ndvi_value, eos_ndvi_value = eos_ndvi_value))
 }
@@ -452,29 +436,30 @@ calculate_sos_eos_apg_pgt_v2 <- function(df) {
 sos <- grouped %>%
   group_by(x, y, Year) %>%
   group_modify(~ calculate_sos_eos_apg_pgt_v2(.x)) %>%
-  ungroup()
-
 
 ############################## visualize results ###############################
-
 str(sos)
 mean(sos$sos_ndvi_value, na.rm=T)
 mean(sos$eos_ndvi_value, na.rm=T)
 ################################################################################
 
-clean_sos <- sos %>%
-  group_by(x, y) %>%
-  # Filter out groups with any NA values in any coloumn
-  filter(!any(is.na(SOS), is.na(EOS), is.na(APG), is.na(PGT))) %>%
-  ungroup()
+# Count the NA in the coloumns
+na_counts <- sos %>%
+  summarise_all(~sum(is.na(.)))
 
-print(paste("Number of excluded Pixel during EOS NA deleting filter:", nrow(sos)-nrow(clean_sos)))
+print(na_counts)
+
+# Exclude all !rows! with NA
+clean_sos <- sos %>%
+  # Filter out rows with any NA values in any column
+  filter(!if_any(everything(), is.na))
+
+print(paste("Number of excluded Years during NA deleting:", nrow(sos)-nrow(clean_sos)))
 nrow(clean_sos)
 str(clean_sos)
 
+################################################################################
 
-mean(clean_sos$sos_ndvi_value, na.rm=T)
-mean(clean_sos$eos_ndvi_value, na.rm=T)
 # Extract month from EOS date
 clean_sos <- clean_sos %>%
   mutate(EOS_month = format(EOS, "%m"), # Extract month as a string
@@ -515,58 +500,82 @@ month_counts[is.na(month_counts)] <- 0
 # Print the result to check
 print(month_counts)
 
-# saveRDS(month_counts, "~/edu/NDVI_germany/docs/month")
-
+################################################################################
+# TODO: Exclude outliers
 
 filtered_sos <- clean_sos %>%
-  filter(!(EOS_month %in% c(1, 2, 3, 4, 5, 12))) %>%
-  filter(!(SOS_month %in% c(1, 7, 8, 9, 10, 11)))
+  filter(!(EOS_month %in% c(1, 2, 3, 4, 5, 6, 7, 12))) %>%
+  filter(!(SOS_month %in% c(1, 2, 6, 7, 8, 9, 10, 11, 12))) %>%
+  filter(!(PGT_month %in% c(1, 2, 3, 4, 9, 10, 11, 12)))
 
-head(filtered_sos)
-# saveRDS(filtered_sos, "~/edu/NDVI_germany/docs/sos_eos")
-
-mean(filtered_sos$sos_ndvi_value, na.rm=T)
-mean(filtered_sos$eos_ndvi_value, na.rm=T)
+str(filtered_sos)
 
 
+# TODO: Exclude pixel groups that have less than xy Years
+# CAUTION: The higher the forced n (=year), the higher the slope!!
+filtered_excl <- filtered_sos %>%
+  # Group by pixel coordinates
+  group_by(x, y) %>%
+  # Add count of non-NA SOS and EOS values for each group
+  mutate(SOS_count = sum(!is.na(SOS)),
+         EOS_count = sum(!is.na(EOS))) %>%
+  # Filter out groups with less than xy non-NA values for either SOS or EOS
+  filter(SOS_count >= 18 & EOS_count >= 18) %>%
+  # Remove the count columns as they are no longer needed
+  select(-SOS_count, -EOS_count) %>%
+  # Ungroup the data
+  ungroup()
+
+nrow(filtered_excl)
+print(paste("Number of excluded Years during outliers deleting:", nrow(filtered_sos)-nrow(filtered_excl)))
+str(filtered_excl)
 
 ################################################################################
-
-clean_sos <- clean_sos %>%
+# TODO: Converting SOS and EOS to day of the year
+filtered_excl <- filtered_excl %>%
   mutate(
     Year = as.numeric(Year),  # Convert Year to numeric
     SOS_julian = yday(SOS)  # Convert SOS to the day of the year
   )
 
-# Perform linear regression
-lm_result <- lm(SOS_julian ~ Year, data = clean_sos)
-
-# Display the summary of the linear model
-summary(lm_result)
-
-str(clean_eos)
 # EOS 
-clean_eos <- clean_sos %>%
+filtered_excl <- filtered_excl %>%
   mutate(
     Year = as.numeric(Year),
     EOS_julian =yday(EOS)
   )
-lm_result <- lm(EOS_julian ~Year, data = clean_eos)
-summary(lm_result)
+
+
+
 ################################################################################
 
-clean_sos <- clean_sos %>%
-  mutate(
-    SOS_julian = yday(SOS),
-    EOS_julian = yday(EOS)
-  )
-
-# Perform linear regression with EOS_julian as the dependent variable
-lm_result <- lm(EOS_julian ~ SOS_julian, data = clean_sos)
+# TODO: Linear Regression
+# linear regression with sos and year
+lm_result <- lm(SOS_julian ~ Year, data = filtered_excl)
 # Display the summary of the linear model
 summary(lm_result)
 
+# linear regression with eos and year
+lm_result <- lm(EOS_julian ~Year, data = filtered_excl)
+summary(lm_result)
+################################################################################
+# TODO: Check the normal distribution!
+#shapiro.test(filtered_excl$SOS_julian) # no normal distribution!
+#shapiro.test(filtered_excl$EOS_julian)# no normal distribution!
 
+# Perform Shapiro-Wilk test on the residuals
+#shapiro.test(residuals(lm_result))
+qqnorm(residuals(lm_result))
+qqline(residuals(lm_result))
+################################################################################
+
+# Perform linear regression with EOS_julian as the dependent variable
+lm_result <- lm(EOS_julian ~ SOS_julian, data = filtered_excl)
+# Display the summary of the linear model
+summary(lm_result)
+
+################################################################################
+# TODO: Look at one pixel
 # Define the coordinates for the pixel group to be extracted with a small tolerance for floating-point comparison
 x_coord <- 8.663542
 y_coord <- 50.01146
@@ -578,9 +587,9 @@ df_2 <- clean_sos %>%
 head(df_2)
 plot(df_2$SOS_julian, df_2$EOS_julian)
 
+################################################################################
 
-cor.test(clean_sos$SOS_julian, clean_sos$EOS_julian)
 
+cor.test(filtered_excl$SOS_julian, filtered_excl$EOS_julian)
 
-# CALCULATION WITH BOTH ASPECTS: LOCAL AND GLOBAL THRESHOLD. 
-
+glmer
