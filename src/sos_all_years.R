@@ -1,19 +1,179 @@
 # Load NDVI Data
-source("~/edu/NDVI_germany/src/NDVI_germany_setup.R")
-data <- readRDS(file.path(envrmt$path_data_level1, "value_march_to_october.rds"))
+source("~/NDVI_germany/src/NDVI_germany_setup.R")
+#data <- readRDS(file.path(envrmt$path_data_level1, "value_march_to_october.rds"))
+data <- readRDS(file.path(envrmt$path_data_level1, "long_ndvi_quality_df.rds"))
 
 # Prepare date Sequences for Each Year
 # This generates a sequence of dates for every year present in the dataset
-years <- unique(data$Year)
-date_sequences <- lapply(years, function(year) {
-  seq(ymd(paste(year, "01-01", sep = "-")), ymd(paste(year, "12-31", sep = "-")), by = "day")
-})
+#years <- unique(data$Year)
+#date_sequences <- lapply(years, function(year) {
+#  seq(ymd(paste(year, "01-01", sep = "-")), ymd(paste(year, "12-31", sep = "-")), by = "day")
+#})
+
+to_binary_string <- function(number, bits = 16) {
+  if (is.na(number)) {
+    return(NA_character_)  # Handle NA values
+  } else {
+    bit_vector <- rev(as.integer(intToBits(number)))
+    bit_string <- paste(bit_vector[(33-bits):32], collapse = "")
+    return(bit_string)
+  }
+}
+
+# Apply the function to the 'Quality' column of your dataframe
+data$Quality_Binary = sapply(data$Quality, to_binary_string, bits = 15)
+data$Quality <- NULL
+head(data)
+
+
+################################################################################
+
+data <- data %>%
+  dplyr::filter(
+    str_sub(Quality_Binary, 1, 2) != "11" & # exclude all not produced observations
+      str_sub(Quality_Binary, 1, 2) != "01" & # exclude all problematic observations 
+      str_sub(Quality_Binary, 3, 4) != "11" & # delete all really bad pixel
+      str_sub(Quality_Binary, 3, 4) != "10" # delete bad quality pixel
+  )
+colnames(data)[1] <- "date"
+data$date <- as.Date(data$date)
+
+detect_clouds <- function(Quality_Binary) {
+  if (str_sub(Quality_Binary, 1, 2) == "10") { # Clouds
+    return(1) # Most probably cloudy
+  } else {
+    return(0) # No clouds
+  }
+}
+
+data <- data %>%
+  mutate(Month = month(date)) %>%
+  mutate(Year = year(date))
+
+
+# Apply the function to create a new Clouds column
+data$Clouds <- sapply(data$Quality_Binary, detect_clouds)
+data$Clouds <- as.numeric(data$Clouds)
+
+
+################################################################################
+# Delete all pixel groups with years with too many clouds or too less observations
+# Convert Year to Date
+
+# Step 1: Filter pixel groups with at least 17 observations in a year
+data <- data %>%
+  group_by(x, y, Year) %>%
+  dplyr::filter(n() >= 17) %>%
+  ungroup()
+
+
+# Step 2: Remove pixel groups with two or more consecutive cloud observations from March to November
+data <- data %>%
+  group_by(x, y) %>%
+  mutate(Clouds_lag = lag(Clouds)) %>%
+  dplyr::filter(!(Month >= 3 & Month <= 11 & Clouds == 1 & Clouds_lag == 1)) %>%
+  dplyr::select(-c(Clouds_lag)) %>%
+  ungroup()
+
+
+
+################################################################################
+# Step 1
+# Replace NDVI_Value with NA for cloudy observations and create lin_int for linear interpolation
+data <- data %>%
+  group_by(x, y) %>%
+  mutate(NDVI_Value = ifelse(Clouds == 1, NA, NDVI_Value)) %>% # Replace cloudy NDVI values with NA
+  mutate(NDVI_Value = na.approx(NDVI_Value, na.rm = FALSE)) %>% # Perform linear interpolation
+  ungroup()
+data <- data %>%
+  group_by(x, y) %>%
+  dplyr::filter(n() >= 9) %>%
+  ungroup()
 
 data <- data %>%
   arrange(x, y, date) %>%
   group_by(x, y) %>%
-  mutate(NDVI_Value = sgolayfilt(NDVI_Value, p = 3, n = 9)) %>%
+  mutate(NDVI_Value = sgolayfilt(NDVI_Value, p = 3, n = 11)) %>%
   ungroup()
+
+#data <- data %>%
+#  mutate(Distance = abs(NDVI_Value - NDVI_Smoothed)) %>%
+#  mutate(Weight = 1 / (1 + Distance)) # Simple weighting scheme; adjust as needed
+
+
+#max_iterations <- 10 # Define a maximum number of iterations to prevent infinite loops
+#convergence_threshold <- 0.01 # Define a threshold for determining convergence
+
+#iterate_group <- function(df_group) {
+#  max_iterations <- 10
+#  convergence_threshold <- 0.01
+#  prev_fitting_effect_index <- Inf
+#  error_count <- 0 # Initialize error counter
+#  
+#  for (iteration in 1:max_iterations) {
+#    # Wrap core logic in tryCatch for error handling
+#    tryCatch({
+#      # Apply Savitzky-Golay filter for refitting
+#      df_group <- df_group %>%
+#        mutate(NDVI_Refitted = sgolayfilt(NDVI_Value, p = 6, n = 9))
+#      
+#      # Recalculate weights
+#      df_group <- df_group %>%
+#        mutate(Distance = abs(NDVI_Value - NDVI_Refitted),
+#               Weight = 1 / (1 + Distance))
+#      
+#      # Calculate fitting-effect index
+#      fitting_effect_index <- mean(df_group$Distance)
+#      
+#      # Check for convergence
+#      if (abs(prev_fitting_effect_index - fitting_effect_index) < convergence_threshold) {
+#        break # Convergence achieved
+#      }
+#      prev_fitting_effect_index <- fitting_effect_index
+#    }, error = function(e) {
+#      # Increment error counter and print error message
+#      error_count <<- error_count + 1
+#      message("Error in iteration ", iteration, ": ", e$message)
+#    })
+#  }
+#  
+#  # Add error count to the dataframe as a new column (or however you wish to track it)
+#  df_group$error_count <- error_count
+#  return(df_group)
+#}
+
+#grouped_data_list <- data %>%
+#  group_by(x, y) %>%
+#  group_split()#
+
+# Apply the iterative fitting process to each group
+#processed_groups <- map(grouped_data_list, iterate_group)
+
+# Combine the processed groups back into a single data frame
+##data_processed <- bind_rows(processed_groups)
+#data_processed$NDVI_Value <- data_processed$NDVI_Refitted
+#data <- data_processed
+#pixels_with_enough_data <- data %>%
+#  dplyr::filter(Year == 2020) %>%
+#  group_by(x, y) %>%
+#  summarise(Entries = n()) %>%
+#  dplyr::filter(Entries >= 10) %>%
+#  ungroup()
+#
+# Then, randomly select one of these pixels
+#random_pixel <- pixels_with_enough_data %>%
+#  sample_n(1)
+#
+# Now, filter the original dataset for the randomly selected pixel and the year 2006
+#data_for_random_pixel_2006 <- data %>%
+#  dplyr::filter(x == random_pixel$x & y == random_pixel$y & Year == 2020)
+
+# Proceed with your plotting or data manipulation
+#ggplot(data_for_random_pixel_2006, aes(x = date)) +
+#  geom_line(aes(y = NDVI_Value_golay, colour = "Golay Filtered NDVI")) +
+#  geom_line(aes(y = NDVI_Value, colour = "Original NDVI")) +
+#  labs(y = "NDVI", colour = "Legend") +
+#  theme_minimal()
 
 data <- data %>%
   mutate(NDVI_Value = if_else(NDVI_Value < 0.3, NA, NDVI_Value)) #%>%
@@ -29,13 +189,13 @@ data <- data %>%
 data <- data[-which(is.na(data$NDVI_Value)),]
 
 pixels_to_exclude <- data %>%
-  dplyr::filter(Month %in% c(12, 1, 2), NDVI_Value > 0.6) %>% # Filter for high NDVI in winter
+  dplyr::filter(Month %in% c(12, 1, 2), NDVI_Value > 0.65) %>% # Filter for high NDVI in winter
   group_by(x, y) %>%
   summarise(Num_Years = n_distinct(Year)) %>% # Count distinct years meeting the condition
-  dplyr::filter(Num_Years >= 4) %>%
+  dplyr::filter(Num_Years >= 5) %>%
   dplyr::select(-Num_Years)
 
-data<- data %>%
+data <- data %>%
   anti_join(pixels_to_exclude, by = c("x", "y"))
 
 df_monthly <- data %>%
@@ -61,7 +221,9 @@ data_expanded <- data %>%
   })) %>%
   unnest(date) %>%
   left_join(data, by = c("Year", "x", "y", "date"))
-
+saveRDS(data_expanded, file.path(envrmt$path_data_level1, "data_expanded_save_15million.rds"))
+data_expanded <- readRDS(file.path(envrmt$path_data_level1, "data_expanded_save_15million.rds"))
+gc()
 
 # Interpolate NDVI Values for Each Pixel
 # Fills in missing NDVI values linearly for days without data
@@ -70,6 +232,7 @@ data_interpolated <- data_expanded %>%
   arrange(date, .by_group = TRUE) %>%
   mutate(NDVI_Value = approx(date, NDVI_Value, date, method = "linear")$y) %>%
   ungroup()
+rm(data_expanded)
 gc()
 # Apply Fourier Smoothing Across All Years
 # Smoothes NDVI values using Fourier terms and linear regression
@@ -104,7 +267,6 @@ data_normalized <- data_interpolated %>%
   ) %>%
   dplyr::select(-Global_Min_NDVI, -Global_Max_NDVI)
 # Normalize Smoothed NDVI Values Across All Years
-
 gc()
 # Identify Start of Season for Each Pixel Across All Years
 # The start of the season is defined as the first date where normalized NDVI exceeds 0.5 for 3 consecutive days
@@ -182,7 +344,7 @@ month_summary <- full_join(SoS_summary, EoS_summary, by = c("SoS_Month" = "EoS_M
   rename(Month = SoS_Month) %>%
   mutate(SoS_Count = replace_na(SoS_Count, 0),
          EoS_Count = replace_na(EoS_Count, 0)) %>%
-  slice(c(1:10, 12:n(), 11))
+  slice(c(1:11, 13:n(), 12))
 
 ndvi_peak <- data_interpolated %>%
   group_by(Year, x, y) %>%
@@ -219,60 +381,7 @@ ggplot(plot_data, aes(x = factor(Year), y = Day_of_Year, fill = Season_Phase)) +
   scale_fill_manual(values = c("SoS_Day_of_Year" = "blue", "EoS_Day_of_Year" = "red")) +
   theme(legend.title = element_blank(), legend.position = "bottom")
 
-sos_trends <- season_dates %>%
-  group_by(x, y) %>%
-  do({
-    tryCatch({
-      mod_sos <- lm(SoS_Day_of_Year ~ Year, data = .)
-      data.frame(Slope = coef(mod_sos)["Year"], PValue = summary(mod_sos)$coefficients["Year", "Pr(>|t|)"])
-    }, error = function(e) {
-      data.frame(Slope = NA, PValue = NA)  # Handle potential errors gracefully
-    })
-  }) %>%
-  ungroup()
 
-# Convert to sf object for spatial plotting
-results_sf_sos <- st_as_sf(sos_trends, coords = c("x", "y"), crs = 4326)
-
-# Filter for significant trends
-results_significant_sos <- results_sf_sos[which(results_sf_sos$PValue <= 0.05),]
-
-# Plotting significant trends for Start of Season
-ggplot(results_significant_sos) +
-  geom_sf(aes(color = Slope)) +
-  scale_color_gradient2(low = "blue", mid = "grey", high = "red", midpoint = 0) +
-  labs(title = "Trend Start of Season over Years for each pixel (p <= 0.05)", color = "Trend Coefficient") +
-  theme_minimal()
-
-# For interactive map with mapview - assuming results_significant_sos is an sf object with a "Slope" column
-mapview(results_significant_sos, 
-        zcol = "Slope",  
-        map.types = "OpenTopoMap")
-
-eos_trends <- season_dates %>%
-  group_by(x, y) %>%
-  do({
-    tryCatch({
-      mod_eos <- lm(EoS_Day_of_Year ~ Year, data = .)
-      data.frame(Slope = coef(mod_eos)["Year"], PValue = summary(mod_eos)$coefficients["Year", "Pr(>|t|)"])
-    }, error = function(e) {
-      data.frame(Slope = NA, PValue = NA)  # Handle potential errors gracefully
-    })
-  }) %>%
-  ungroup()
-
-# Convert to sf object for spatial plotting
-results_sf_eos <- st_as_sf(eos_trends, coords = c("x", "y"), crs = 4326)
-
-# Filter for significant trends
-results_significant_eos <- results_sf_eos[which(results_sf_eos$PValue <= 0.05),]
-
-# Plotting significant trends for End of Season
-ggplot(results_significant_eos) +
-  geom_sf(aes(color = Slope)) +
-  scale_color_gradient2(low = "blue", mid = "grey", high = "red", midpoint = 0) +
-  labs(title = "Trend End of Season over Years for each pixel (p <= 0.05)", color = "Trend Coefficient") +
-  theme_minimal()
 
 # For interactive map with mapview - assuming results_significant_eos is an sf object with a "Slope" column
 mapview(results_significant_eos, 
@@ -280,9 +389,9 @@ mapview(results_significant_eos,
         map.types = "OpenTopoMap")
 
 
-saveRDS(data_normalized, file.path(envrmt$path_data_level1, "normalized_with_filter.rds"))
-saveRDS(season_dates, file.path(envrmt$path_data_level1, "season_date_with_filter.rds"))
-season_dates <- readRDS("~/season_date.rds")
-
+saveRDS(data_normalized, file.path(envrmt$path_data_level1, "normalized_all_interpol_golay_3_11.rds"))
+saveRDS(season_dates, file.path(envrmt$path_data_level1, "season_date_all_interpol_golay_3_11.rds"))
+#season_dates <- readRDS("~/season_date.rds")
+#season_dates<- readRDS(file.path(envrmt$path_data_level1, "season_date_with_filter.rds"))
 
 
